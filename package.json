@@ -5,11 +5,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/zenk-t-suzuki/mcp-upload-kit.git"
+    "url": "git+https://github.com/zenk-co/mcp-upload-kit.git"
   },
-  "homepage": "https://github.com/zenk-t-suzuki/mcp-upload-kit#readme",
+  "homepage": "https://github.com/zenk-co/mcp-upload-kit#readme",
   "bugs": {
-    "url": "https://github.com/zenk-t-suzuki/mcp-upload-kit/issues"
+    "url": "https://github.com/zenk-co/mcp-upload-kit/issues"
   },
   "type": "module",
   "keywords": [
