@@ -1018,6 +1018,112 @@ describe("resumableReceiver", () => {
     expect(errorBody.error).toMatch(/offset mismatch/);
   });
 
+  test("rejects a chunked body longer than X-Upload-Content-Length without failing the record", async () => {
+    const dest = memoryResumable();
+    const uploads = createUploads<Result, unknown, RecordValue, ResumableUploadDestination<Result, RecordValue>>({
+      store: kvTransferStore<RecordValue>(memoryKv()),
+      baseUrl: "https://files.example.test",
+      maxBytes: 1024,
+      receiver: resumableReceiver<Result, RecordValue>(),
+    });
+    const prepared = await uploads.prepare({
+      owner: "user-1",
+      name: "tiny.txt",
+      size: 1,
+      contentType: "text/plain",
+    });
+
+    const oversized = await uploads.receiveWith({
+      uploadId: prepared.uploadId,
+      request: streamedChunkRequest(prepared.uploadUrl, prepared.uploadToken, new Uint8Array(4096), "1", 0, 0, 1),
+      selectDestination: () => dest,
+    });
+    expect(oversized.status).toBe(413);
+    expect((await uploads.get(prepared.uploadId))?.status).toBe("pending");
+
+    // The client can resend the same offset with a well-formed chunk.
+    const retried = await uploads.receiveWith({
+      uploadId: prepared.uploadId,
+      request: streamedChunkRequest(prepared.uploadUrl, prepared.uploadToken, new TextEncoder().encode("a"), "1", 0, 0, 1),
+      selectDestination: () => dest,
+    });
+    expect(retried.status).toBe(200);
+    expect(await retried.json()).toMatchObject({ accepted: true, actualSize: 1 });
+  });
+
+  test("rejects a chunked body shorter than X-Upload-Content-Length without failing the record", async () => {
+    let writes = 0;
+    const dest = memoryResumable();
+    const uploads = createUploads<Result, unknown, RecordValue, ResumableUploadDestination<Result, RecordValue>>({
+      store: kvTransferStore<RecordValue>(memoryKv()),
+      baseUrl: "https://files.example.test",
+      maxBytes: 1024,
+      receiver: resumableReceiver<Result, RecordValue>(),
+    });
+    const prepared = await uploads.prepare({
+      owner: "user-1",
+      name: "short.txt",
+      size: 11,
+      contentType: "text/plain",
+    });
+
+    const response = await uploads.receiveWith({
+      uploadId: prepared.uploadId,
+      request: streamedChunkRequest(prepared.uploadUrl, prepared.uploadToken, new TextEncoder().encode("hey"), "6", 0, 5, 11),
+      selectDestination: () => ({
+        ...dest,
+        async writeChunk(input) {
+          writes += 1;
+          return dest.writeChunk(input);
+        },
+      }),
+    });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ actual: 3, expected: 6 });
+    expect(writes).toBe(0);
+    expect((await uploads.get(prepared.uploadId))?.status).toBe("pending");
+  });
+
+  test("rejects a completed upload whose actualSize differs from the prepared size and runs cleanup", async () => {
+    let cleaned = false;
+    const dest: ResumableUploadDestination<Result, RecordValue> = {
+      async writeChunk({ record, chunk }) {
+        const all = concat([chunk, chunk]);
+        return {
+          status: "complete",
+          result: { objectKey: record.uploadId },
+          actualSize: all.byteLength,
+          actualSha256: await sha256Hex(all),
+        };
+      },
+      async cleanup() {
+        cleaned = true;
+      },
+    };
+    const uploads = createUploads<Result, unknown, RecordValue, ResumableUploadDestination<Result, RecordValue>>({
+      store: kvTransferStore<RecordValue>(memoryKv()),
+      baseUrl: "https://files.example.test",
+      maxBytes: 1024,
+      receiver: resumableReceiver<Result, RecordValue>(),
+    });
+    const prepared = await uploads.prepare({
+      owner: "user-1",
+      name: "grown.txt",
+      size: 5,
+      contentType: "text/plain",
+    });
+
+    const response = await uploads.receiveWith({
+      uploadId: prepared.uploadId,
+      request: chunkRequest(prepared.uploadUrl, prepared.uploadToken, new TextEncoder().encode("hello"), 0, 4, 5),
+      selectDestination: () => dest,
+    });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: "size mismatch", expected: 5, actual: 10 });
+    expect(cleaned).toBe(true);
+    await expect(uploads.complete({ uploadId: prepared.uploadId })).rejects.toThrow(/size mismatch/);
+  });
+
   test("requires a Content-Range header", async () => {
     const dest = memoryResumable();
     const uploads = createUploads<Result, unknown, RecordValue, ResumableUploadDestination<Result, RecordValue>>({
@@ -1069,6 +1175,34 @@ function chunkRequest(
     },
     body: body as unknown as BodyInit,
   });
+}
+
+// Simulates a `Transfer-Encoding: chunked` PUT: no `Content-Length`, only the
+// client-declared `X-Upload-Content-Length`.
+function streamedChunkRequest(
+  url: string,
+  token: string,
+  body: Uint8Array,
+  declaredLength: string,
+  start: number,
+  end: number,
+  total: number,
+): Request {
+  return new Request(url, {
+    method: "PUT",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "X-Upload-Content-Length": declaredLength,
+      "Content-Range": `bytes ${start}-${end}/${total}`,
+    },
+    body: new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(body);
+        controller.close();
+      },
+    }),
+    duplex: "half",
+  } as RequestInit);
 }
 
 describe("createDownloads", () => {
@@ -1126,6 +1260,7 @@ describe("createDownloads", () => {
     expect(res.status).toBe(200);
     expect(res.headers.get("Content-Type")).toBe("text/plain");
     expect(res.headers.get("Content-Disposition")).toContain("hello.txt");
+    expect(res.headers.get("X-Content-Type-Options")).toBe("nosniff");
     expect(new TextDecoder().decode(new Uint8Array(await res.arrayBuffer()))).toBe("hello drive");
   });
 

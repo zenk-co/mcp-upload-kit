@@ -68,6 +68,10 @@ Two receivers ship with the kit:
   destination, then verifies size and SHA-256.
 - `resumableReceiver()` — chunked uploads. It owns the `Content-Range` / `308`
   wire protocol and delegates the stateful work to a `ResumableUploadDestination`.
+  Each chunk is read up to its declared length and must match it exactly; a bad
+  chunk is rejected (`400` / `413`) without failing the upload, so the client can
+  resend it. On completion the destination's `actualSize` must equal the
+  prepared `size` (`409` otherwise), as with single-shot.
 
 `singleShotReceiver({ validate, verify })` lets you override an individual step
 while keeping the rest of the pipeline. This is the key design point: deviating
@@ -116,15 +120,15 @@ kit reuses the same `TransferStore` for download grants. See
 | --- | --- |
 | `200` | Accepted and stored. |
 | `308` | (resumable) chunk accepted; more expected — see the `Range` header. |
-| `400` | Malformed request, invalid range, or `Content-Length` ≠ prepared size. |
+| `400` | Malformed request, invalid range, `Content-Length` ≠ prepared size, or (resumable) chunk body shorter than its declared length. |
 | `401` | Missing or invalid bearer token. |
 | `403` | Token owner mismatch. |
 | `404` | Upload session not found. |
 | `405` | Method is not `PUT`. |
-| `409` | Already completed/failed, no destination, or SHA-256 mismatch. |
+| `409` | Already completed/failed, no destination, or size / SHA-256 mismatch. |
 | `410` | Upload session expired. |
 | `411` | Missing `Content-Length`. |
-| `413` | Body exceeds the configured or prepared maximum. |
+| `413` | Body exceeds the configured or prepared maximum, or (resumable) chunk body exceeds its declared length. |
 | `502` | Destination threw, or returned before fully consuming the body. |
 
 ## Where the kit stops

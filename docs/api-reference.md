@@ -67,7 +67,11 @@ resumableReceiver<Result, RecordValue>(): UploadReceiver
 ```
 
 Chunked uploads. Owns the `Content-Range` / `308` protocol and delegates state to
-the selected `ResumableUploadDestination`.
+the selected `ResumableUploadDestination`. Each chunk body must be exactly the
+length given by `Content-Length` (or `X-Upload-Content-Length`); a longer body is
+cut off with `413` and a shorter one rejected with `400`, without failing the
+record. A `complete` outcome whose `actualSize` differs from the prepared `size`
+fails the record (running destination `cleanup`) with `409`.
 
 ## Stores
 

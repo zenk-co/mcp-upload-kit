@@ -152,6 +152,9 @@ const uploads = createUploads<
 
 The client PUTs each chunk with `Content-Range: bytes <start>-<end>/<total>`. The
 receiver replies `308` (with a `Range` header) until the final chunk completes.
+The kit guarantees that `chunk.byteLength` equals `end - start + 1`, and on
+completion rejects (`409`) an `actualSize` that differs from the prepared `size`,
+so return the number of bytes actually stored.
 See [`examples/mcp-server-resumable`](../examples/mcp-server-resumable) for a
 runnable version.
 
@@ -205,7 +208,8 @@ Response headers come from the grant (`contentType` → `Content-Type`, `name` �
 `Content-Disposition`, `size` → `Content-Length`), falling back to whatever the
 source `Response` advertised when the grant omits them. So a backend that only
 learns the MIME type after fetching the bytes can set `Content-Type` on its own
-`Response` and `serve` will pass it through.
+`Response` and `serve` will pass it through. `serve` always adds
+`X-Content-Type-Options: nosniff`.
 
 ## Custom upload store
 
