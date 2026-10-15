@@ -831,11 +831,20 @@ export function resumableReceiver<
         return jsonResponse({ error: "Content-Range size != Content-Length" }, 400);
       }
 
-      const chunk = new Uint8Array(await ctx.request.arrayBuffer());
+      // `X-Upload-Content-Length` is client-declared and not enforced by HTTP
+      // framing, so bound the read and check the actual length. A bad chunk is
+      // rejected without failing the record, so the client can resend it.
+      const chunk = await readChunkBody(ctx.request.body, contentLength);
+      if (!chunk.ok) return chunk.response;
 
       let outcome: ResumableChunkOutcome<Result>;
       try {
-        outcome = await destination.writeChunk({ record: ctx.record, chunk, range, request: ctx.request });
+        outcome = await destination.writeChunk({
+          record: ctx.record,
+          chunk: chunk.bytes,
+          range,
+          request: ctx.request,
+        });
       } catch (err) {
         const reason = err instanceof Error ? err.message : "chunk write failed";
         await ctx.fail(reason);
@@ -853,6 +862,16 @@ export function resumableReceiver<
         await ctx.fail(outcome.message);
         await runResumableCleanup(destination, ctx.record, outcome.message);
         return jsonResponse({ error: outcome.message }, outcome.httpStatus);
+      }
+
+      if (outcome.actualSize !== ctx.record.size) {
+        const reason = `size mismatch: expected ${ctx.record.size}, actual ${outcome.actualSize}`;
+        await ctx.fail(reason);
+        await runResumableCleanup(destination, ctx.record, reason);
+        return jsonResponse(
+          { error: "size mismatch", expected: ctx.record.size, actual: outcome.actualSize },
+          409,
+        );
       }
 
       if (
@@ -942,6 +961,39 @@ async function runCleanup<Result, RecordValue extends TransferUploadRecord<Resul
   } catch {
     // The upload state must remain failed even if backend cleanup fails.
   }
+}
+
+async function readChunkBody(
+  body: ReadableStream<Uint8Array>,
+  contentLength: number,
+): Promise<{ ok: true; bytes: Uint8Array } | { ok: false; response: Response }> {
+  const reader = body.getReader();
+  const out = new Uint8Array(contentLength);
+  let size = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value) continue;
+    if (size + value.byteLength > contentLength) {
+      await reader.cancel().catch(() => {});
+      return {
+        ok: false,
+        response: jsonResponse({ error: "chunk body exceeds Content-Length", expected: contentLength }, 413),
+      };
+    }
+    out.set(value, size);
+    size += value.byteLength;
+  }
+  if (size !== contentLength) {
+    return {
+      ok: false,
+      response: jsonResponse(
+        { error: "chunk body length != Content-Length", expected: contentLength, actual: size },
+        400,
+      ),
+    };
+  }
+  return { ok: true, bytes: out };
 }
 
 async function runResumableCleanup<Result, RecordValue extends TransferUploadRecord<Result>>(
@@ -1104,6 +1156,7 @@ export function createDownloads<
     const contentLength =
       record.size !== undefined ? String(record.size) : res.headers.get("Content-Length");
     if (contentLength) headers.set("Content-Length", contentLength);
+    headers.set("X-Content-Type-Options", "nosniff");
 
     return new Response(res.body, { status: 200, headers });
   }
